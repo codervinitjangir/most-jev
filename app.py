@@ -25,9 +25,17 @@ if not api_key:
 # Initialize Gemini Client
 client = genai.Client(api_key=api_key)
 
+# The model name required by your API Key / Account
+MODEL_NAME = "gemini-3.8-flash"
+
 # Maintain simple chat history
 if "messages" not in st.session_state:
     st.session_state.messages = []
+
+# Clear chat button
+if st.sidebar.button("🗑️ Clear Chat"):
+    st.session_state.messages = []
+    st.rerun()
 
 # Display conversation
 for msg in st.session_state.messages:
@@ -51,26 +59,15 @@ if audio_record:
                 audio_bytes = audio_record.getvalue()
                 mime = audio_record.type or "audio/wav"
                 res = client.models.generate_content(
-                    model="gemini-2.5-flash",
+                    model=MODEL_NAME,
                     contents=[
                         genai.types.Part.from_bytes(data=audio_bytes, mime_type=mime),
-                        "Transcribe the spoken audio verbatim. Return only the spoken text."
+                        "Transcribe this spoken audio verbatim. Output only the spoken words, nothing else."
                     ]
                 )
-                user_text = res.text.strip()
+                user_text = res.text.strip() if res.text else None
             except Exception as e:
-                # If 2.5-flash not available try 1.5-flash or 3.8-flash
-                try:
-                    res = client.models.generate_content(
-                        model="gemini-1.5-flash",
-                        contents=[
-                            genai.types.Part.from_bytes(data=audio_bytes, mime_type=mime),
-                            "Transcribe the spoken audio verbatim. Return only the spoken text."
-                        ]
-                    )
-                    user_text = res.text.strip()
-                except Exception as inner_e:
-                    st.error(f"Error reading voice: {inner_e}")
+                st.error(f"Error reading voice: {e}")
 
 elif text_record:
     user_text = text_record
@@ -84,38 +81,17 @@ if user_text:
     # Get response from Nova
     with st.chat_message("assistant"):
         with st.spinner("Nova is thinking..."):
-            prompt = (
-                "You are Nova, a friendly, warm, caring companion. "
-                "Keep your replies concise, supportive, and natural.\n\n"
-                f"User: {user_text}"
-            )
-            bot_reply = None
-            
-            # Try available model endpoints in order of preference
-            for model_candidate in ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash"]:
-                try:
-                    response = client.models.generate_content(
-                        model=model_candidate,
-                        contents=prompt
-                    )
-                    bot_reply = response.text
-                    if bot_reply:
-                        break
-                except Exception:
-                    continue
-
-            if not bot_reply:
-                # Last attempt to capture exact error for the user
-                try:
-                    response = client.models.generate_content(
-                        model="gemini-2.5-flash",
-                        contents=prompt
-                    )
-                    bot_reply = response.text
-                except Exception as err:
-                    st.error(f"Gemini API Error: {err}")
-
-            if bot_reply:
+            try:
+                prompt = (
+                    "You are Nova, a friendly, warm, caring companion. "
+                    "Keep your replies concise, supportive, and natural.\n\n"
+                    f"User: {user_text}"
+                )
+                response = client.models.generate_content(
+                    model=MODEL_NAME,
+                    contents=prompt
+                )
+                bot_reply = response.text or "I'm here with you."
                 st.write(bot_reply)
 
                 # Generate speech with gTTS
@@ -131,8 +107,11 @@ if user_text:
                         "content": bot_reply,
                         "audio": audio_data
                     })
-                except Exception as e:
+                except Exception:
                     st.session_state.messages.append({
                         "role": "assistant",
                         "content": bot_reply
                     })
+
+            except Exception as err:
+                st.error(f"Gemini API Error: {err}")
