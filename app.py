@@ -53,7 +53,7 @@ if audio_record:
                 audio_bytes = audio_record.getvalue()
                 mime = audio_record.type or "audio/wav"
                 res = client.models.generate_content(
-                    model="gemini-2.0-flash",
+                    model="gemini-2.5-flash",
                     contents=[
                         genai.types.Part.from_bytes(data=audio_bytes, mime_type=mime),
                         "Transcribe the spoken audio verbatim. Return only the spoken text."
@@ -81,7 +81,7 @@ if user_text:
                     f"User: {user_text}"
                 )
                 response = client.models.generate_content(
-                    model="gemini-2.0-flash",
+                    model="gemini-2.5-flash",
                     contents=prompt
                 )
                 bot_reply = response.text or "I'm here with you."
