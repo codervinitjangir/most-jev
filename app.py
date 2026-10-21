@@ -1,29 +1,78 @@
 import os
 import io
-from flask import Flask, request, jsonify, render_template_string
+import streamlit as st
 from google import genai
 from google.genai import types
 from elevenlabs.client import ElevenLabs
+from gtts import gTTS
 
-app = Flask(__name__)
+# Configure Streamlit page
+st.set_page_config(
+    page_title="🌸 Nova - AI Companion",
+    page_icon="🌸",
+    layout="centered"
+)
 
-# State initialization
-TODOS = []
-MODEL = "gemini-3.5-flash-lite"
+# Custom CSS for aesthetics
+st.markdown("""
+<style>
+    .stChatInput { margin-bottom: 20px; }
+    .badge {
+        display: inline-block;
+        padding: 4px 10px;
+        border-radius: 12px;
+        background: #f1f2f6;
+        font-size: 0.85rem;
+        margin-right: 6px;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-# Initialize APIs securely using environment variables
-gemini_api_key = os.getenv("Gemini") or os.getenv("GEMINI_API_KEY")
-eleven_api_key = os.getenv("Eleven") or os.getenv("ELEVEN_API_KEY")
+st.title("🌸 Nova Companion")
+st.caption("Your warm, emotionally intelligent AI voice companion & todo assistant.")
 
-if gemini_api_key:
-    gen = genai.Client(api_key=gemini_api_key)
-else:
-    gen = None
+# Fetch API keys from Streamlit secrets or OS environment
+gemini_key = (
+    st.secrets.get("GEMINI_API_KEY") 
+    or st.secrets.get("Gemini") 
+    or os.getenv("GEMINI_API_KEY") 
+    or os.getenv("Gemini")
+)
+eleven_key = (
+    st.secrets.get("ELEVEN_API_KEY") 
+    or st.secrets.get("Eleven") 
+    or os.getenv("ELEVEN_API_KEY") 
+    or os.getenv("Eleven")
+)
 
-if eleven_api_key:
-    eleven_client = ElevenLabs(api_key=eleven_api_key)
-else:
-    eleven_client = None
+# Sidebar for configuration and To-Do overview
+with st.sidebar:
+    st.header("⚙️ Configuration")
+    if not gemini_key:
+        gemini_key = st.text_input("Gemini API Key", type="password")
+    else:
+        st.success("✅ Gemini Connected")
+
+    if not eleven_key:
+        eleven_key = st.text_input("ElevenLabs API Key (Optional)", type="password")
+    else:
+        st.success("✅ ElevenLabs Connected")
+        
+    st.markdown("---")
+    st.header("📋 Your To-Do List")
+    if "todos" not in st.session_state:
+        st.session_state.todos = []
+
+    if not st.session_state.todos:
+        st.write("No tasks yet! Ask Nova to add tasks for you.")
+    else:
+        for idx, item in enumerate(st.session_state.todos, 1):
+            check = "✅" if item["done"] else "⬜"
+            st.write(f"{check} **{idx}.** {item['task']}")
+
+# Initialize Clients
+gen_client = genai.Client(api_key=gemini_key) if gemini_key else None
+eleven_client = ElevenLabs(api_key=eleven_key) if eleven_key else None
 
 SYSTEM_PROMPT = """
 You are Nova, a warm, caring, and emotionally intelligent AI companion.
@@ -39,153 +88,114 @@ Never claim an action was completed unless a tool actually completed it.
 Your goal is not only to help with tasks, but also to make the user feel understood, supported, and less alone.
 """
 
-# Helper tools
+# Tool functions for Gemini
 def add_todo(task: str) -> str:
-    TODOS.append({"task": task, "done": False})
+    """Add a new task to the user's todo list."""
+    st.session_state.todos.append({"task": task, "done": False})
     return f"I've added '{task}'. One small step at a time. ❤️"
 
 def list_todos() -> str:
-    if not TODOS:
+    """List all current tasks and their status."""
+    if not st.session_state.todos:
         return "Your to-do list is empty! 😊"
-    result = []
-    for idx, item in enumerate(TODOS, 1):
+    res = []
+    for idx, item in enumerate(st.session_state.todos, 1):
         status = "✅" if item["done"] else "❌"
-        result.append(f"{idx}. {item['task']} [{status}]")
-    return "\n".join(result)
+        res.append(f"{idx}. {item['task']} [{status}]")
+    return "\n".join(res)
 
 def mark_done(number: int) -> str:
-    if not 1 <= number <= len(TODOS):
-        return "I couldn't find that task."
-    task = TODOS[number - 1]["task"]
-    TODOS[number - 1]["done"] = True
-    return f"Great job. You completed '{task}'. I'm proud of you. 🌟"
+    """Mark a task as done by its task number (1-based index)."""
+    todos = st.session_state.todos
+    if not (1 <= number <= len(todos)):
+        return "I couldn't find that task number."
+    task = todos[number - 1]["task"]
+    todos[number - 1]["done"] = True
+    return f"Great job! You completed '{task}'. I'm proud of you. 🌟"
 
 TOOLS = [add_todo, list_todos, mark_done]
-HISTORY = []
 
-def think(text):
-    global HISTORY
-    if not gen:
-        return "Gemini API Key is not set up properly.", []
-    
-    chat = gen.chats.create(
-        model=MODEL,
-        history=HISTORY,
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            tools=TOOLS,
-            max_output_tokens=300
-        )
-    )
-    reply = chat.send_message(text).text or "Sorry, I didn't catch that."
-    new = chat.get_history()[len(HISTORY):]
-    HISTORY = chat.get_history()
-    
-    used = [
-        f"{p.function_call.name}({dict(p.function_call.args or {})})"
-        for c in new
-        for p in (c.parts or [])
-        if p.function_call
-    ]
-    return reply, used
+# Initialize message state
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "gemini_history" not in st.session_state:
+    st.session_state.gemini_history = []
 
-@app.route("/api/chat", methods=["POST"])
-def chat_api():
-    data = request.json or {}
-    message = data.get("message", "")
-    if not message:
-        return jsonify({"error": "Empty message"}), 400
-        
-    reply, used = think(message)
-    return jsonify({"reply": reply, "tools": used})
+# Display conversation history
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.write(msg["content"])
+        if "audio" in msg:
+            st.audio(msg["audio"], format="audio/mp3")
 
-@app.route("/api/speak", methods=["POST"])
-def speak_api():
-    data = request.json or {}
-    text = data.get("text", "")
-    if not text:
-        return jsonify({"error": "Empty text"}), 400
-        
+# Text-to-speech generator helper
+def generate_audio(text: str) -> bytes:
     if eleven_client:
         try:
-            voice_settings = {
-                "stability": 0.35,
-                "similarity_boost": 0.75,
-                "style": 0.15
-            }
             audio_generator = eleven_client.text_to_speech.convert(
                 text=text,
                 voice_id="EXAVITQu4vr4xnSDxMaL",
                 output_format="mp3_44100_128",
                 model_id="eleven_flash_v2_5",
-                voice_settings=voice_settings
+                voice_settings={"stability": 0.35, "similarity_boost": 0.75, "style": 0.15}
             )
-            return app.response_class(b"".join(list(audio_generator)), mimetype="audio/mpeg")
-        except Exception as e:
+            return b"".join(list(audio_generator))
+        except Exception:
             pass
-            
-    from gtts import gTTS
+
+    # Fallback to gTTS
     buf = io.BytesIO()
-    gTTS(text).write_to_fp(buf)
-    return app.response_class(buf.getvalue(), mimetype="audio/mpeg")
+    tts = gTTS(text=text, lang="en")
+    tts.write_to_fp(buf)
+    return buf.getvalue()
 
-@app.route("/")
-def home():
-    return render_template_string("""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Nova Companion</title>
-        <style>
-            body { font-family: sans-serif; max-width: 600px; margin: 40px auto; padding: 20px; text-align: center; background: #faf9f6; color: #333; }
-            .card { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
-            button { padding: 12px 24px; font-size: 16px; border: none; border-radius: 20px; background: #ff7675; color: white; cursor: pointer; margin-top: 15px; }
-            button:hover { background: #e84393; }
-            input { width: 80%; padding: 10px; margin-top: 15px; border-radius: 8px; border: 1px solid #ddd; }
-            #response { margin-top: 20px; font-style: italic; color: #555; }
-        </style>
-    </head>
-    <body>
-        <div class="card">
-            <h1>🌸 Meet Nova</h1>
-            <p>Your warm and emotionally intelligent voice companion.</p>
-            <input type="text" id="msgInput" placeholder="Tell Nova how your day went..." />
-            <br />
-            <button onclick="talkToNova()">Send to Nova</button>
-            <div id="response"></div>
-            <audio id="audioPlayer" autoplay></audio>
-        </div>
-        <script>
-            async function talkToNova() {
-                const input = document.getElementById('msgInput');
-                const responseDiv = document.getElementById('response');
-                const audioPlayer = document.getElementById('audioPlayer');
-                const text = input.value;
-                if(!text) return;
-                
-                responseDiv.innerText = "Thinking...";
-                const res = await fetch('/api/chat', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message: text })
-                });
-                const data = await res.json();
-                responseDiv.innerText = data.reply;
-                
-                // Get synthesized voice
-                const audioRes = await fetch('/api/speak', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ text: data.reply })
-                });
-                const audioBlob = await audioRes.blob();
-                audioPlayer.src = URL.createObjectURL(audioBlob);
-                input.value = "";
-            }
-        </script>
-    </body>
-    </html>
-    """)
+# Handle input
+user_prompt = st.chat_input("Tell Nova how your day went or manage your todos...")
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+if user_prompt:
+    # Render user message
+    st.session_state.messages.append({"role": "user", "content": user_prompt})
+    with st.chat_message("user"):
+        st.write(user_prompt)
+
+    # Process response
+    if not gen_client:
+        with st.chat_message("assistant"):
+            warning_msg = "Please provide your Gemini API key in the sidebar or via Streamlit secrets to chat with Nova."
+            st.warning(warning_msg)
+            st.session_state.messages.append({"role": "assistant", "content": warning_msg})
+    else:
+        with st.chat_message("assistant"):
+            with st.spinner("Nova is thinking..."):
+                chat = gen_client.chats.create(
+                    model="gemini-2.5-flash",
+                    history=st.session_state.gemini_history,
+                    config=types.GenerateContentConfig(
+                        system_instruction=SYSTEM_PROMPT,
+                        tools=TOOLS,
+                        max_output_tokens=400
+                    )
+                )
+                response = chat.send_message(user_prompt)
+                reply_text = response.text or "I'm here with you."
+                st.session_state.gemini_history = chat.get_history()
+
+                st.write(reply_text)
+
+                # Generate speech
+                try:
+                    audio_bytes = generate_audio(reply_text)
+                    st.audio(audio_bytes, format="audio/mp3", autoplay=True)
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": reply_text,
+                        "audio": audio_bytes
+                    })
+                except Exception:
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": reply_text
+                    })
+                
+                # Rerun to update sidebar todo changes if any tool modified state
+                st.rerun()
