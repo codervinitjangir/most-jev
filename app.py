@@ -25,8 +25,8 @@ if not api_key:
 # Initialize Gemini Client
 client = genai.Client(api_key=api_key)
 
-# The model name required by your API Key / Account
-MODEL_NAME = "gemini-3.8-flash"
+# Fallback sequence of available models
+MODELS = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
 
 # Maintain simple chat history
 if "messages" not in st.session_state:
@@ -54,64 +54,81 @@ if audio_record:
     audio_id = f"{audio_record.name}_{audio_record.size}"
     if st.session_state.get("last_audio_id") != audio_id:
         st.session_state["last_audio_id"] = audio_id
-        with st.spinner("Transcribing voice..."):
-            try:
-                audio_bytes = audio_record.getvalue()
-                mime = audio_record.type or "audio/wav"
-                res = client.models.generate_content(
-                    model=MODEL_NAME,
-                    contents=[
-                        genai.types.Part.from_bytes(data=audio_bytes, mime_type=mime),
-                        "Transcribe this spoken audio verbatim. Output only the spoken words, nothing else."
-                    ]
-                )
-                user_text = res.text.strip() if res.text else None
-            except Exception as e:
-                st.error(f"Error reading voice: {e}")
+        with st.status("Transcribing voice...", expanded=False):
+            audio_bytes = audio_record.getvalue()
+            mime = audio_record.type or "audio/wav"
+            transcription_done = False
+            for m in MODELS:
+                try:
+                    res = client.models.generate_content(
+                        model=m,
+                        contents=[
+                            genai.types.Part.from_bytes(data=audio_bytes, mime_type=mime),
+                            "Transcribe this spoken audio verbatim. Output only the spoken words, nothing else."
+                        ]
+                    )
+                    if res.text:
+                        user_text = res.text.strip()
+                        transcription_done = True
+                        break
+                except Exception:
+                    continue
+            if not transcription_done:
+                st.error("Could not transcribe voice with available models.")
 
 elif text_record:
     user_text = text_record
 
 if user_text:
-    # Add user message
+    # Add and render user message
     st.session_state.messages.append({"role": "user", "content": user_text})
     with st.chat_message("user"):
         st.write(user_text)
 
-    # Get response from Nova
+    # Nova response placeholder
     with st.chat_message("assistant"):
-        with st.spinner("Nova is thinking..."):
+        response_box = st.empty()
+        response_box.markdown("*(thinking...)*")
+
+        prompt = (
+            "You are Nova, a friendly, warm, caring companion. "
+            "Keep your replies concise, supportive, and natural.\n\n"
+            f"User: {user_text}"
+        )
+
+        bot_reply = None
+        last_error = None
+
+        for m in MODELS:
             try:
-                prompt = (
-                    "You are Nova, a friendly, warm, caring companion. "
-                    "Keep your replies concise, supportive, and natural.\n\n"
-                    f"User: {user_text}"
-                )
-                response = client.models.generate_content(
-                    model=MODEL_NAME,
+                resp = client.models.generate_content(
+                    model=m,
                     contents=prompt
                 )
-                bot_reply = response.text or "I'm here with you."
-                st.write(bot_reply)
+                if resp.text:
+                    bot_reply = resp.text
+                    break
+            except Exception as e:
+                last_error = e
+                continue
 
-                # Generate speech with gTTS
-                try:
-                    tts_buf = io.BytesIO()
-                    tts = gTTS(text=bot_reply, lang="en")
-                    tts.write_to_fp(tts_buf)
-                    audio_data = tts_buf.getvalue()
+        if bot_reply:
+            response_box.write(bot_reply)
 
-                    st.audio(audio_data, format="audio/mp3", autoplay=True)
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": bot_reply,
-                        "audio": audio_data
-                    })
-                except Exception:
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": bot_reply
-                    })
+            # Generate speech safely
+            audio_data = None
+            try:
+                tts_buf = io.BytesIO()
+                tts = gTTS(text=bot_reply, lang="en")
+                tts.write_to_fp(tts_buf)
+                audio_data = tts_buf.getvalue()
+                st.audio(audio_data, format="audio/mp3", autoplay=True)
+            except Exception:
+                pass
 
-            except Exception as err:
-                st.error(f"Gemini API Error: {err}")
+            msg_payload = {"role": "assistant", "content": bot_reply}
+            if audio_data:
+                msg_payload["audio"] = audio_data
+            st.session_state.messages.append(msg_payload)
+        else:
+            response_box.error(f"Error connecting to Gemini: {last_error}")
