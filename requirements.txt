@@ -1,5 +1,4 @@
-streamlit
-transformers
-sentencepiece
-tiktoken
-numpy
+google-genai
+elevenlabs
+flask
+gtts
